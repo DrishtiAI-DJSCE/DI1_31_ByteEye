@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+evidence/
+drishti_events.db
+models/*.pt
