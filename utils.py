@@ -62,3 +62,48 @@ def is_hand_raised(kpts, bbox_height, threshold_ratio):
                 right_raised = True
                 
     return left_raised or right_raised
+
+def calculate_iou(box1, box2):
+    """Calculate Intersection over Union for two bounding boxes (x1, y1, x2, y2)."""
+    x_left = max(box1[0], box2[0])
+    y_top = max(box1[1], box2[1])
+    x_right = min(box1[2], box2[2])
+    y_bottom = min(box1[3], box2[3])
+
+    if x_right < x_left or y_bottom < y_top:
+        return 0.0
+
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    iou = intersection_area / float(box1_area + box2_area - intersection_area + 1e-6)
+    return iou
+
+def get_bounding_box_containment(inner_box, outer_box):
+    """Calculate how much of inner_box is contained within outer_box."""
+    x_left = max(inner_box[0], outer_box[0])
+    y_top = max(inner_box[1], outer_box[1])
+    x_right = min(inner_box[2], outer_box[2])
+    y_bottom = min(inner_box[3], outer_box[3])
+
+    if x_right < x_left or y_bottom < y_top:
+        return 0.0
+
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+    inner_area = (inner_box[2] - inner_box[0]) * (inner_box[3] - inner_box[1])
+    
+    return intersection_area / float(inner_area + 1e-6)
+
+import statistics
+
+def robust_stats(values):
+    """Return median and Median Absolute Deviation (MAD)."""
+    if not values:
+        return None, None
+    if len(values) == 1:
+        return values[0], 0.0
+        
+    med = statistics.median(values)
+    mad = statistics.median([abs(x - med) for x in values])
+    return med, mad

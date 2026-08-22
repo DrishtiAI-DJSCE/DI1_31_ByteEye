@@ -1,338 +1,395 @@
+"""
+behaviour.py
+============
+Temporal behaviour analysis for DRISHTI MVP (CCTV-Optimized & Per-Person State).
+"""
+
 import time
 import collections
 import config
+import os
+import csv
 from severity import calculate_risk_score
-from utils import get_keypoint, calculate_yaw_ratio, is_hand_raised
+from utils import get_keypoint, is_hand_raised, calculate_iou, get_bounding_box_containment, robust_stats
+
+# ---------------------------------------------------------------------------
+# Main analyser
+# ---------------------------------------------------------------------------
 
 class BehaviourAnalyzer:
     def __init__(self):
-        # state is tracked per event_type globally to prevent multiple instances of the same event
-        self.state = {}
-        self.episode_history = collections.defaultdict(collections.deque)
+        self.state = collections.defaultdict(dict)
+        self.episode_history = collections.defaultdict(lambda: collections.defaultdict(collections.deque))
         self.track_baselines = {}
         
+        # Diagnostic file initialization
+        if config.DIAGNOSTIC_MODE:
+            self._init_diagnostic_csv()
+
+    def _init_diagnostic_csv(self):
+        os.makedirs(os.path.dirname(config.DIAGNOSTIC_CSV_PATH), exist_ok=True)
+        # Write header if not exists
+        if not os.path.exists(config.DIAGNOSTIC_CSV_PATH):
+            with open(config.DIAGNOSTIC_CSV_PATH, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "timestamp", "track_id", "nose_shoulder_ratio", "baseline_yaw",
+                    "yaw_deviation", "shoulder_width", "baseline_shoulder_width",
+                    "shoulder_width_ratio", "wrist_deviation", "wrist_velocity",
+                    "phone_confidence", "phone_person_iou", "candidate_anomaly", "notes"
+                ])
+
     def reset(self):
-        """Reset the internal state for a new session."""
-        self.state = {}
-        self.episode_history = collections.defaultdict(collections.deque)
-        self.track_baselines = {}
+        """Reset all state for a new monitoring session."""
+        self.state.clear()
+        self.episode_history.clear()
+        self.track_baselines.clear()
 
-    def _get_state_key(self, event_type):
-        return event_type
+    def update_track(self, track_id: int, event_type: str, is_occurring: bool,
+                     persistence_threshold: float, now_ts: float) -> tuple[bool, bool]:
+        """Per-person temporal persistence gate."""
+        key = event_type
+        
+        if key not in self.state[track_id]:
+            self.state[track_id][key] = {
+                "first_seen": 0,
+                "last_seen":  0,
+                "active":     False,
+                "cooldown_until": 0,
+            }
 
-    def update(self, event_type, is_occurring, persistence_threshold):
-        key = self._get_state_key(event_type)
-        now = time.time()
+        st = self.state[track_id][key]
 
-        if key not in self.state:
-            self.state[key] = {"first_seen": 0, "last_seen": 0, "active": False, "cooldown_until": 0}
+        if is_occurring:
+            st["last_seen"] = now_ts
 
-        st = self.state[key]
-
-        if now < st["cooldown_until"]:
-            return False, st["active"] # Return newly_confirmed, is_currently_active
+        if now_ts < st["cooldown_until"]:
+            return False, st["active"]
 
         newly_confirmed = False
+
         if is_occurring:
             if st["first_seen"] == 0:
-                st["first_seen"] = now
-            st["last_seen"] = now
+                st["first_seen"] = now_ts
 
-            if (now - st["first_seen"]) >= persistence_threshold and not st["active"]:
+            duration = now_ts - st["first_seen"]
+            if duration >= persistence_threshold and not st["active"]:
                 st["active"] = True
-                st["cooldown_until"] = now + config.EVENT_COOLDOWN_SECONDS
+                st["cooldown_until"] = now_ts + config.EVENT_COOLDOWN_SECONDS
                 newly_confirmed = True
         else:
-            if (now - st["last_seen"]) > 1.0:
-                 if st["first_seen"] != 0:
-                     duration = st["last_seen"] - st["first_seen"]
-                     self.episode_history[key].append((st["last_seen"], duration))
-                 st["first_seen"] = 0
-                 st["active"] = False
-                 
+            # Grace period of TRACK_LOSS_GRACE_PERIOD
+            if (now_ts - st["last_seen"]) > config.TRACK_LOSS_GRACE_PERIOD:
+                if st["first_seen"] != 0:
+                    duration = st["last_seen"] - st["first_seen"]
+                    self.episode_history[track_id][key].append((st["last_seen"], duration))
+                st["first_seen"] = 0
+                st["active"] = False
+
         return newly_confirmed, st["active"]
-        
-    def check_frequency_anomaly(self, event_type, window_seconds, min_count):
-        """Checks if there have been min_count episodes within window_seconds."""
-        now = time.time()
-        history = self.episode_history[event_type]
-        
-        # Prune old episodes
-        while history and (now - history[0][0]) > window_seconds:
+
+    def check_frequency_anomaly(self, track_id: int, event_type: str,
+                                 window_seconds: float, min_count: int, now_ts: float) -> bool:
+        """Detects REPEATED instances for a specific track."""
+        history = self.episode_history[track_id][event_type]
+
+        # Remove old episodes
+        while history and (now_ts - history[0][0]) > window_seconds:
             history.popleft()
-            
+
         if len(history) >= min_count:
-            # Clear history to avoid rapid re-triggering (or rely on cooldown)
             history.clear()
-            # Also put the main tracker on cooldown so we don't spam
-            if event_type in self.state:
-                self.state[event_type]["cooldown_until"] = now + config.EVENT_COOLDOWN_SECONDS
+            if event_type in self.state[track_id]:
+                self.state[track_id][event_type]["cooldown_until"] = now_ts + config.EVENT_COOLDOWN_SECONDS
             return True
-            
+
         return False
-        
-    def process_calibration(self, track_id, raw_yaw, shoulder_width, now_ts):
-        """
-        Updates the per-seat calibration buffer for the given track_id.
-        Returns a tuple: (baseline_yaw, baseline_shoulder_width) if calibrated, else (None, None).
-        """
+
+    def process_calibration(self, track_id, raw_yaw: float | None,
+                             shoulder_width: float | None,
+                             wrist_y: float | None,
+                             now_ts: float) -> tuple:
+        """Builds stable per-student baselines using robust stats (Median/MAD)."""
         if track_id is None:
-            return None, None
-            
+            return None, None, None
+
         if track_id not in self.track_baselines:
             self.track_baselines[track_id] = {
-                "start_time": now_ts,
-                "history_yaw": [],
-                "history_width": [],
-                "locked": False,
-                "baseline_yaw": None,
+                "start_time":     now_ts,
+                "history_yaw":    [],
+                "history_width":  [],
+                "history_wrist":  [],
+                "locked":         False,
+                "baseline_yaw":   None,
                 "baseline_width": None,
-                "last_seen": now_ts
+                "baseline_wrist": None,
+                "last_seen":      now_ts,
             }
-            
+
         tb = self.track_baselines[track_id]
         tb["last_seen"] = now_ts
-        
+
         if tb["locked"]:
-            return tb["baseline_yaw"], tb["baseline_width"]
-            
-        # Add to history if we have valid readings
-        if raw_yaw is not None:
-            tb["history_yaw"].append(raw_yaw)
-        if shoulder_width is not None:
-            tb["history_width"].append(shoulder_width)
-            
-        # Keep window size reasonable (max 150 frames ~ 10 seconds at 15fps)
-        if len(tb["history_yaw"]) > 150:
-            tb["history_yaw"].pop(0)
-        if len(tb["history_width"]) > 150:
-            tb["history_width"].pop(0)
-            
-        # Check if we should lock
-        if (now_ts - tb["start_time"]) >= config.CALIBRATION_SECONDS:
-            if len(tb["history_yaw"]) > 20 and len(tb["history_width"]) > 20:
-                yaw_variance = max(tb["history_yaw"]) - min(tb["history_yaw"])
-                # If stable (variance < 0.15)
-                if yaw_variance < 0.15:
-                    sorted_yaw = sorted(tb["history_yaw"])
-                    sorted_width = sorted(tb["history_width"])
-                    tb["baseline_yaw"] = sorted_yaw[len(sorted_yaw)//2]
-                    tb["baseline_width"] = sorted_width[len(sorted_width)//2]
+            # Rolling wrist baseline (always updates slowly even after locked)
+            if wrist_y is not None:
+                tb["history_wrist"].append(wrist_y)
+                if len(tb["history_wrist"]) > 60: tb["history_wrist"].pop(0)
+                med_wrist, _ = robust_stats(tb["history_wrist"])
+                tb["baseline_wrist"] = med_wrist
+                
+            return tb["baseline_yaw"], tb["baseline_width"], tb["baseline_wrist"]
+
+        # Only add valid readings
+        if raw_yaw is not None: tb["history_yaw"].append(raw_yaw)
+        if shoulder_width is not None: tb["history_width"].append(shoulder_width)
+        if wrist_y is not None: tb["history_wrist"].append(wrist_y)
+
+        # Rolling window: keep last ~4s (60 frames)
+        if len(tb["history_yaw"]) > 60: tb["history_yaw"].pop(0)
+        if len(tb["history_width"]) > 60: tb["history_width"].pop(0)
+        if len(tb["history_wrist"]) > 60: tb["history_wrist"].pop(0)
+
+        calibration_elapsed = now_ts - tb["start_time"]
+
+        if calibration_elapsed >= config.CALIBRATION_SECONDS:
+            hy = tb["history_yaw"]
+            hw = tb["history_width"]
+
+            if len(hy) >= config.CALIBRATION_MIN_FRAMES and len(hw) >= config.CALIBRATION_MIN_FRAMES:
+                med_yaw, mad_yaw = robust_stats(hy)
+                
+                # Check stability using MAD instead of range
+                if mad_yaw is not None and mad_yaw < 0.10: 
+                    tb["baseline_yaw"] = med_yaw
+                    med_width, _ = robust_stats(hw)
+                    tb["baseline_width"] = med_width
+                    med_wrist, _ = robust_stats(tb["history_wrist"])
+                    tb["baseline_wrist"] = med_wrist
+                    
                     tb["locked"] = True
-                    return tb["baseline_yaw"], tb["baseline_width"]
-            
-            # If not stable, slide window forward
-            tb["start_time"] = now_ts - (config.CALIBRATION_SECONDS / 2.0)
-            
-        return None, None
+                    return tb["baseline_yaw"], tb["baseline_width"], tb["baseline_wrist"]
+
+            # Not stable yet: slide window forward
+            tb["start_time"] = now_ts - (config.CALIBRATION_SECONDS * 0.5)
+
+        med_wrist, _ = robust_stats(tb["history_wrist"]) if tb["history_wrist"] else (None, 0)
+        return None, None, med_wrist
+
+    def _nose_shoulder_ratio(self, kpts: list) -> float | None:
+        if len(kpts) < 7: return None
+        nose_x, nose_y, nose_c = get_keypoint(kpts[0])
+        ls_x, ls_y, ls_c = get_keypoint(kpts[5])
+        rs_x, rs_y, rs_c = get_keypoint(kpts[6])
+
+        if (nose_c is None or nose_c < config.CCTV_KPT_MIN_CONF or
+                ls_c is None or ls_c < config.CCTV_KPT_MIN_CONF or
+                rs_c is None or rs_c < config.CCTV_KPT_MIN_CONF):
+            return None
+
+        shoulder_mid_x = (ls_x + rs_x) / 2.0
+        shoulder_width = abs(ls_x - rs_x)
+
+        if shoulder_width < 8.0: return None
+        return abs(nose_x - shoulder_mid_x) / shoulder_width
+
+    def _ear_asymmetry_glance(self, kpts: list) -> bool:
+        if len(kpts) < 5: return False
+        le_x, le_y, le_c = get_keypoint(kpts[3])
+        re_x, re_y, re_c = get_keypoint(kpts[4])
+        if le_c is None or re_c is None: return False
+
+        turned_right = (le_c >= config.EAR_VISIBLE_MIN_CONF and re_c <= config.EAR_HIDDEN_MAX_CONF and le_c / (re_c + 1e-6) >= config.EAR_ASYMMETRY_RATIO)
+        turned_left = (re_c >= config.EAR_VISIBLE_MIN_CONF and le_c <= config.EAR_HIDDEN_MAX_CONF and re_c / (le_c + 1e-6) >= config.EAR_ASYMMETRY_RATIO)
+        return turned_right or turned_left
+
+    def _shoulder_width(self, kpts: list) -> float | None:
+        if len(kpts) < 7: return None
+        ls_x, ls_y, ls_c = get_keypoint(kpts[5])
+        rs_x, rs_y, rs_c = get_keypoint(kpts[6])
+        if (ls_c is None or ls_c < config.CCTV_KPT_MIN_CONF or rs_c is None or rs_c < config.CCTV_KPT_MIN_CONF):
+            return None
+        width = abs(ls_x - rs_x)
+        return width if width > 5.0 else None
         
-    def analyze_frame_data(self, persons, phones, poses, frame_dims=None):
-        """
-        Analyzes the detections and poses for behaviours.
-        Returns a tuple: (confirmed_events, active_highlights)
-        """
+    def _get_avg_wrist_y(self, kpts: list) -> float | None:
+        if len(kpts) < 11: return None
+        lw_x, lw_y, lw_c = get_keypoint(kpts[9])
+        rw_x, rw_y, rw_c = get_keypoint(kpts[10])
+        valid = []
+        if lw_c is not None and lw_c > config.CCTV_KPT_MIN_CONF: valid.append(lw_y)
+        if rw_c is not None and rw_c > config.CCTV_KPT_MIN_CONF: valid.append(rw_y)
+        return sum(valid)/len(valid) if valid else None
+
+    def analyze_frame_data(self, persons: list, phones: list, poses: list, frame_dims=None) -> tuple:
         confirmed_events = []
         active_highlights = []
         now_ts = time.time()
-        
-        # Prune stale tracks
-        stale_ids = [tid for tid, tb in self.track_baselines.items() if (now_ts - tb["last_seen"]) > 5.0]
-        for tid in stale_ids:
+
+        # Clean stale tracks
+        stale = [tid for tid, tb in self.track_baselines.items() if (now_ts - tb["last_seen"]) > (config.TRACK_LOSS_GRACE_PERIOD * 2)]
+        for tid in stale:
             del self.track_baselines[tid]
+            if tid in self.state: del self.state[tid]
+            if tid in self.episode_history: del self.episode_history[tid]
+
+        # ----------------------------------------------------------------
+        # 1. PHONE / UNAUTHORIZED OBJECT (Associated vs Unassociated)
+        # ----------------------------------------------------------------
+        associated_phones = {} # track_id -> phone
+        unassociated_phones = []
         
-        # 1. Process Phones globally
-        is_phone_present = len(phones) > 0
-        phone_confirmed, phone_active = self.update("MOBILE_PHONE", is_phone_present, config.PHONE_PERSISTENCE_SECONDS)
-        best_phone = max(phones, key=lambda p: p['conf']) if is_phone_present else None
-        
-        if phone_confirmed:
-            event_data = {
-                "event_type": "MOBILE_PHONE",
-                "confidence": best_phone['conf'] if best_phone else 1.0,
-                "bbox": best_phone['bbox'] if best_phone else None,
-                "timestamp": now_ts,
-                "duration": now_ts - self.state["MOBILE_PHONE"]["first_seen"] if self.state.get("MOBILE_PHONE", {}).get("first_seen") else 0.0,
-                "frame_dims": frame_dims
-            }
-            event_data["severity"] = calculate_risk_score(event_data)
-            confirmed_events.append(event_data)
+        for phone in phones:
+            best_iou = 0
+            best_track = None
+            phone_bbox = phone['bbox']
             
-        if phone_active and best_phone:
-            event_data = {
-                "event_type": "MOBILE_PHONE",
-                "confidence": best_phone['conf'],
-                "bbox": best_phone['bbox'],
-                "duration": now_ts - self.state["MOBILE_PHONE"]["first_seen"] if self.state.get("MOBILE_PHONE", {}).get("first_seen") else 0.0,
+            for pose in poses:
+                if 'track_id' not in pose or pose['track_id'] is None: continue
+                iou = calculate_iou(phone_bbox, pose['bbox'])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_track = pose['track_id']
+                    
+            if best_track and best_iou > config.PHONE_PERSON_IOU_THRESHOLD:
+                if best_track not in associated_phones or phone['conf'] > associated_phones[best_track]['conf']:
+                    associated_phones[best_track] = phone
+            else:
+                unassociated_phones.append(phone)
+
+        # Handle unassociated phones (Global state)
+        if None not in self.state: self.state[None] = {}
+        has_unassoc = len(unassociated_phones) > 0
+        u_conf, u_act = self.update_track(None, "UNASSOCIATED_PHONE", has_unassoc, config.PHONE_PERSISTENCE_SECONDS, now_ts)
+        
+        if u_conf:
+            best_uphone = max(unassociated_phones, key=lambda p: p['conf'])
+            ev = {
+                "event_type": "UNASSOCIATED_MOBILE_PHONE",
+                "confidence": best_uphone['conf'],
+                "bbox": best_uphone['bbox'],
+                "timestamp": now_ts,
+                "duration": now_ts - self.state[None]["UNASSOCIATED_PHONE"]["first_seen"],
                 "frame_dims": frame_dims
             }
-            active_highlights.append({
-                "bbox": best_phone['bbox'],
-                "severity": calculate_risk_score(event_data),
-                "label": "MOBILE PHONE"
-            })
-        
-        # 2. Process Persons/Poses for glance/rotation/hand-raise
-        is_turning = False
-        is_rotating = False
-        is_hand_up = False
-        
-        best_pose_turn = None
-        best_pose_rot = None
-        best_pose_hand = None
-        
+            ev["severity"] = calculate_risk_score(ev)
+            confirmed_events.append(ev)
+            
+        if u_act:
+            for up in unassociated_phones:
+                active_highlights.append({"bbox": up['bbox'], "severity": "HIGH", "label": "UNASSOCIATED PHONE"})
+
+        # ----------------------------------------------------------------
+        # 2. POSE-BASED BEHAVIOURS
+        # ----------------------------------------------------------------
         for pose in poses:
-            kpts = pose['keypoints']
-            bbox = pose['bbox']
-            bbox_height = abs(bbox[3] - bbox[1])
+            track_id = pose.get("track_id")
+            if track_id is None: continue
             
-            # Extract raw features if visible
-            raw_yaw = None
-            shoulder_width = None
+            kpts = pose["keypoints"]
+            bbox = pose["bbox"]
+
+            nsr = self._nose_shoulder_ratio(kpts)
+            ear_glance = self._ear_asymmetry_glance(kpts)
+            sw = self._shoulder_width(kpts)
+            wrist_y = self._get_avg_wrist_y(kpts)
+
+            baseline_yaw, baseline_width, baseline_wrist = self.process_calibration(track_id, nsr, sw, wrist_y, now_ts)
+
+            # --- Detection Logic ---
+            is_turning = False
+            yaw_deviation = 0.0
             
-            n_kpt = get_keypoint(kpts[0]) if len(kpts) > 0 else (0,0,None)
-            n_c = n_kpt[2]
-            
-            le_c, re_c, ls_c, rs_c = None, None, None, None
-            
-            if len(kpts) > 4:
-                le_kpt = get_keypoint(kpts[3])
-                re_kpt = get_keypoint(kpts[4])
-                le_c, re_c = le_kpt[2], re_kpt[2]
-                if le_c is not None and re_c is not None and le_c > 0.3 and re_c > 0.3 and n_c is not None and n_c > 0.3:
-                    raw_yaw = calculate_yaw_ratio(n_kpt, le_kpt, re_kpt)
-                    
-            if len(kpts) > 6:
-                ls_kpt = get_keypoint(kpts[5])
-                rs_kpt = get_keypoint(kpts[6])
-                ls_c, rs_c = ls_kpt[2], rs_kpt[2]
-                if ls_c is not None and rs_c is not None and ls_c > 0.3 and rs_c > 0.3:
-                    shoulder_width = abs(ls_kpt[0] - rs_kpt[0])
-                    
-            # Process Calibration
-            track_id = pose.get('track_id')
-            baseline_yaw, baseline_width = self.process_calibration(track_id, raw_yaw, shoulder_width, now_ts)
-            
-            # SIDEWARD GLANCE
-            if len(kpts) > 4:
-                # Rule 1: Confidence collapse override
-                if le_c is not None and re_c is not None:
-                    if (le_c > 0.7 and re_c < 0.3) or (re_c > 0.7 and le_c < 0.3):
+            if nsr is not None:
+                if baseline_yaw is not None:
+                    yaw_deviation = abs(nsr - baseline_yaw)
+                    if yaw_deviation > config.NOSE_SHOULDER_GLANCE_THRESHOLD:
                         is_turning = True
-                        best_pose_turn = pose
-                
-                # Rule 2: Deviation from baseline
-                if baseline_yaw is not None and raw_yaw is not None:
-                    yaw_deviation = abs(raw_yaw - baseline_yaw)
-                    if yaw_deviation > config.YAW_DEVIATION_THRESHOLD:
+                else:
+                    if nsr > (config.NOSE_SHOULDER_GLANCE_THRESHOLD + 0.05):
                         is_turning = True
-                        best_pose_turn = pose
-                        
-            # BODY ROTATION
-            if len(kpts) > 6:
-                # Rule 1: Confidence collapse override
-                if ls_c is not None and rs_c is not None:
-                    if (ls_c > 0.7 and rs_c < 0.3) or (rs_c > 0.7 and ls_c < 0.3):
-                        is_rotating = True
-                        best_pose_rot = pose
-                        
-                # Rule 2: Shoulder shrink fallback
-                if baseline_width is not None and shoulder_width is not None:
-                    width_ratio = shoulder_width / (baseline_width + 1e-5)
-                    if width_ratio < config.SHOULDER_SHRINK_THRESHOLD:
-                        is_rotating = True
-                        best_pose_rot = pose
-                            
-            # HAND RAISE (HAND_MOVEMENT)
-            if is_hand_raised(kpts, bbox_height, config.HAND_MOVEMENT_THRESHOLD):
-                is_hand_up = True
-                best_pose_hand = pose
+
+            if not is_turning and ear_glance and nsr is not None and nsr > (config.NOSE_SHOULDER_GLANCE_THRESHOLD - 0.05):
+                is_turning = True
+
+            is_rotating = False
+            width_ratio = 1.0
+            if baseline_width is not None and sw is not None:
+                width_ratio = sw / (baseline_width + 1e-6)
+                if width_ratio < config.SHOULDER_SHRINK_THRESHOLD:
+                    is_rotating = True
+
+            is_hand_up = False
+            wrist_deviation = 0.0
+            if baseline_wrist is not None and wrist_y is not None:
+                # Wrist y is smaller when raised (closer to 0)
+                # Significant upward deviation relative to their normal resting position
+                # Scale invariant deviation based on bbox height
+                bbox_h = bbox[3] - bbox[1]
+                wrist_deviation = (baseline_wrist - wrist_y) / (bbox_h + 1e-6)
+                if wrist_deviation > 0.25: # Hand raised ~25% of body height above normal resting position
+                    is_hand_up = True
+
+            # --- Temporal Gates ---
+            turn_conf, turn_act = self.update_track(track_id, "SIDEWARD_GLANCE", is_turning, config.HEAD_TURN_PERSISTENCE_SECONDS, now_ts)
+            turn_freq = self.check_frequency_anomaly(track_id, "SIDEWARD_GLANCE", 20.0, 3, now_ts)
             
-        turn_confirmed, turn_active = self.update("SIDEWARD_GLANCE", is_turning, config.HEAD_TURN_PERSISTENCE_SECONDS)
-        turn_freq = self.check_frequency_anomaly("SIDEWARD_GLANCE", 15.0, 3)
-        
-        rot_confirmed, rot_active = self.update("BODY_ROTATION", is_rotating, config.BODY_ROTATION_PERSISTENCE_SECONDS)
-        rot_freq = self.check_frequency_anomaly("BODY_ROTATION", 15.0, 3)
-        
-        hand_confirmed, hand_active = self.update("HAND_MOVEMENT", is_hand_up, config.HAND_MOVEMENT_PERSISTENCE_SECONDS)
-        
-        if turn_confirmed or turn_freq:
-            event_data = {
-                "event_type": "SIDEWARD_GLANCE",
-                "confidence": 1.0,
-                "bbox": best_pose_turn['bbox'] if best_pose_turn else None,
-                "timestamp": now_ts,
-                "duration": now_ts - self.state["SIDEWARD_GLANCE"]["first_seen"] if self.state.get("SIDEWARD_GLANCE", {}).get("first_seen") else 0.0,
-                "frame_dims": frame_dims,
-                "is_frequency_anomaly": bool(turn_freq)
-            }
-            event_data["severity"] = calculate_risk_score(event_data)
-            confirmed_events.append(event_data)
+            rot_conf, rot_act = self.update_track(track_id, "BODY_ROTATION", is_rotating, config.BODY_ROTATION_PERSISTENCE_SECONDS, now_ts)
+            rot_freq = self.check_frequency_anomaly(track_id, "BODY_ROTATION", 20.0, 3, now_ts)
             
-        if turn_active and best_pose_turn:
-            event_data = {
-                "event_type": "SIDEWARD_GLANCE",
-                "confidence": 1.0,
-                "bbox": best_pose_turn['bbox'],
-                "duration": now_ts - self.state["SIDEWARD_GLANCE"]["first_seen"] if self.state.get("SIDEWARD_GLANCE", {}).get("first_seen") else 0.0,
-                "frame_dims": frame_dims
-            }
-            active_highlights.append({
-                "bbox": best_pose_turn['bbox'],
-                "severity": calculate_risk_score(event_data),
-                "label": "SIDEWARD GLANCE"
-            })
+            hand_conf, hand_act = self.update_track(track_id, "HAND_MOVEMENT", is_hand_up, config.HAND_MOVEMENT_PERSISTENCE_SECONDS, now_ts)
+            
+            # --- Associated Phone ---
+            has_assoc_phone = track_id in associated_phones
+            phone_conf, phone_act = self.update_track(track_id, "MOBILE_PHONE", has_assoc_phone, config.PHONE_PERSISTENCE_SECONDS, now_ts)
+
+            # --- Diagnostic Logging ---
+            if config.DIAGNOSTIC_MODE:
+                candidate = "NORMAL"
+                if is_turning or is_rotating or is_hand_up or has_assoc_phone:
+                    candidate = "CANDIDATE"
                 
-        if rot_confirmed or rot_freq:
-            event_data = {
-                "event_type": "BODY_ROTATION",
-                "confidence": 1.0,
-                "bbox": best_pose_rot['bbox'] if best_pose_rot else None,
-                "timestamp": now_ts,
-                "duration": now_ts - self.state["BODY_ROTATION"]["first_seen"] if self.state.get("BODY_ROTATION", {}).get("first_seen") else 0.0,
-                "frame_dims": frame_dims,
-                "is_frequency_anomaly": bool(rot_freq)
-            }
-            event_data["severity"] = calculate_risk_score(event_data)
-            confirmed_events.append(event_data)
-            
-        if rot_active and best_pose_rot:
-            event_data = {
-                "event_type": "BODY_ROTATION",
-                "confidence": 1.0,
-                "bbox": best_pose_rot['bbox'],
-                "duration": now_ts - self.state["BODY_ROTATION"]["first_seen"] if self.state.get("BODY_ROTATION", {}).get("first_seen") else 0.0,
-                "frame_dims": frame_dims
-            }
-            active_highlights.append({
-                "bbox": best_pose_rot['bbox'],
-                "severity": calculate_risk_score(event_data),
-                "label": "BODY ROTATION"
-            })
-            
-        if hand_confirmed:
-            event_data = {
-                "event_type": "HAND_MOVEMENT",
-                "confidence": 1.0,
-                "bbox": best_pose_hand['bbox'] if best_pose_hand else None,
-                "timestamp": now_ts,
-                "duration": now_ts - self.state["HAND_MOVEMENT"]["first_seen"] if self.state.get("HAND_MOVEMENT", {}).get("first_seen") else 0.0,
-                "frame_dims": frame_dims
-            }
-            event_data["severity"] = calculate_risk_score(event_data)
-            confirmed_events.append(event_data)
-            
-        if hand_active and best_pose_hand:
-            event_data = {
-                "event_type": "HAND_MOVEMENT",
-                "confidence": 1.0,
-                "bbox": best_pose_hand['bbox'],
-                "duration": now_ts - self.state["HAND_MOVEMENT"]["first_seen"] if self.state.get("HAND_MOVEMENT", {}).get("first_seen") else 0.0,
-                "frame_dims": frame_dims
-            }
-            active_highlights.append({
-                "bbox": best_pose_hand['bbox'],
-                "severity": calculate_risk_score(event_data),
-                "label": "HAND RAISE"
-            })
+                assoc_iou = 0.0
+                p_conf = 0.0
+                if has_assoc_phone:
+                    p_conf = associated_phones[track_id]['conf']
+                    assoc_iou = calculate_iou(associated_phones[track_id]['bbox'], bbox)
                 
+                with open(config.DIAGNOSTIC_CSV_PATH, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        now_ts, track_id, nsr, baseline_yaw, yaw_deviation, sw, baseline_width, width_ratio,
+                        wrist_deviation, 0.0, p_conf, assoc_iou, candidate, ""
+                    ])
+
+            # --- Emitting Events ---
+            if turn_conf or turn_freq:
+                ev = {"event_type": "SIDEWARD_GLANCE", "confidence": 1.0, "bbox": bbox, "timestamp": now_ts,
+                      "duration": now_ts - self.state[track_id]["SIDEWARD_GLANCE"]["first_seen"], "frame_dims": frame_dims}
+                ev["severity"] = calculate_risk_score(ev)
+                confirmed_events.append(ev)
+            if turn_act: active_highlights.append({"bbox": bbox, "severity": "MEDIUM", "label": "SIDEWARD GLANCE"})
+
+            if rot_conf or rot_freq:
+                ev = {"event_type": "BODY_ROTATION", "confidence": 1.0, "bbox": bbox, "timestamp": now_ts,
+                      "duration": now_ts - self.state[track_id]["BODY_ROTATION"]["first_seen"], "frame_dims": frame_dims}
+                ev["severity"] = calculate_risk_score(ev)
+                confirmed_events.append(ev)
+            if rot_act: active_highlights.append({"bbox": bbox, "severity": "MEDIUM", "label": "BODY ROTATION"})
+            
+            if hand_conf:
+                ev = {"event_type": "HAND_MOVEMENT", "confidence": 1.0, "bbox": bbox, "timestamp": now_ts,
+                      "duration": now_ts - self.state[track_id]["HAND_MOVEMENT"]["first_seen"], "frame_dims": frame_dims}
+                ev["severity"] = calculate_risk_score(ev)
+                confirmed_events.append(ev)
+            if hand_act: active_highlights.append({"bbox": bbox, "severity": "MEDIUM", "label": "HAND MOVEMENT"})
+            
+            if phone_conf:
+                ev = {"event_type": "MOBILE_PHONE", "confidence": associated_phones[track_id]['conf'], "bbox": associated_phones[track_id]['bbox'], "timestamp": now_ts,
+                      "duration": now_ts - self.state[track_id]["MOBILE_PHONE"]["first_seen"], "frame_dims": frame_dims}
+                ev["severity"] = calculate_risk_score(ev)
+                confirmed_events.append(ev)
+            if phone_act: 
+                p_bbox = associated_phones[track_id]['bbox'] if track_id in associated_phones else bbox
+                active_highlights.append({"bbox": p_bbox, "severity": "HIGH", "label": "MOBILE PHONE"})
+
         return confirmed_events, active_highlights

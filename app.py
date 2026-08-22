@@ -252,6 +252,16 @@ def monitoring_page():
                 frame = cv2.flip(frame, 1)
                 
             st.session_state['frame_idx'] += 1
+            
+            # Skip frames to maintain real-time playback for uploaded video
+            if st.session_state['input_mode'] == "UPLOADED_VIDEO":
+                skip_frames = max(1, int(fps / config.TARGET_FPS)) - 1
+                for _ in range(skip_frames):
+                    ret_skip, _ = cap.read()
+                    if not ret_skip:
+                        break
+                    st.session_state['frame_idx'] += 1
+                    
             t0 = time.time()
             
             # Analyze
@@ -265,10 +275,28 @@ def monitoring_page():
             # Save anomalies
             evidence_added = False
             for anomaly in confirmed_anomalies:
-                snapshot_path = evidence.save_evidence(frame, anomaly, st.session_state['session_id'])
-                anomaly['snapshot_path'] = snapshot_path
-                database.insert_event(anomaly, st.session_state['session_id'])
-                evidence_added = True
+                if config.DEBUG_MODE:
+                    print(f"[BEHAVIOUR] {anomaly['event_type']} detected")
+                    print(f"[CONFIRMED] {anomaly['event_type']} | Persistence satisfied")
+                    print(f"[SEVERITY] {anomaly.get('severity', 'LOW')}")
+                    print(f"[EVIDENCE] saving snapshot...")
+                
+                try:
+                    snapshot_path = evidence.save_evidence(frame, anomaly, st.session_state['session_id'])
+                    anomaly['snapshot_path'] = snapshot_path
+                    if config.DEBUG_MODE:
+                        print(f"[EVIDENCE] saved: {snapshot_path}")
+                        
+                    database.insert_event(anomaly, st.session_state['session_id'])
+                    if config.DEBUG_MODE:
+                        print(f"[DATABASE] event inserted")
+                        
+                    evidence_added = True
+                except Exception as e:
+                    print(f"[ERROR] Failed to save evidence for {anomaly['event_type']}: {e}")
+                    # Do not discard the event, just insert without a path
+                    anomaly['snapshot_path'] = ""
+                    database.insert_event(anomaly, st.session_state['session_id'])
                 
             # Draw Live View
             viz_frame = frame.copy()
@@ -279,13 +307,27 @@ def monitoring_page():
                 cv2.rectangle(viz_frame, (x1, y1), (x2, y2), (255, 0, 0), 1) 
                 
             # 2. CONTINUOUS: Default skeletons for ALL poses
+            skeleton_pairs = [
+                (15, 13), (13, 11), (16, 14), (14, 12), (11, 12),
+                (5, 11), (6, 12), (5, 6), (5, 7), (6, 8), (7, 9),
+                (8, 10), (1, 2), (0, 1), (0, 2), (1, 3), (2, 4),
+                (3, 5), (4, 6)
+            ]
+            from utils import get_keypoint
             for pose in res['poses']:
-                for kpt in pose['keypoints']:
-                    from utils import get_keypoint
+                kpts = pose['keypoints']
+                # Draw lines
+                for (i, j) in skeleton_pairs:
+                    if i < len(kpts) and j < len(kpts):
+                        x1, y1, c1 = get_keypoint(kpts[i])
+                        x2, y2, c2 = get_keypoint(kpts[j])
+                        if (c1 is None or c1 > 0.5) and (c2 is None or c2 > 0.5):
+                            cv2.line(viz_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                # Draw points
+                for kpt in kpts:
                     x, y, conf = get_keypoint(kpt)
-                    # If confidence is missing or > 0.5, draw the keypoint
                     if conf is None or conf > 0.5:
-                        cv2.circle(viz_frame, (int(x), int(y)), 3, (0, 255, 255), -1) 
+                        cv2.circle(viz_frame, (int(x), int(y)), 4, (0, 255, 255), -1) 
                         
             # 3. CONTINUOUS: Default boxes for ALL phones
             for phone in res['phones']:
@@ -406,7 +448,7 @@ def main():
         page = st.sidebar.radio("Go to", ["Live Monitoring", "Event History"])
         
         st.sidebar.markdown("---")
-        if st.sidebar.button("Stop Monitoring", type="primary", use_container_width=True):
+        if st.sidebar.button("Stop Monitoring", type="primary", width='stretch'):
             cleanup_session()
             st.rerun()
             

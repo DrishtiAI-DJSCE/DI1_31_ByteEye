@@ -20,8 +20,8 @@ class VisionAnalyzer:
         Returns:
             dict containing lists of persons, phones, and poses
         """
-        # Run object detection. Classes: 0 is person, 67 is cell phone in COCO.
-        results_obj = self.object_model(frame, imgsz=config.INFERENCE_IMGSZ, classes=[0, 67], conf=config.PERSON_CONFIDENCE, verbose=False)
+        # Run object detection. Custom Model Classes: 0 is cell phone, 1 is person.
+        results_obj = self.object_model(frame, imgsz=config.INFERENCE_IMGSZ, conf=config.PERSON_CONFIDENCE, verbose=False)
         
         persons = []
         phones = []
@@ -33,9 +33,9 @@ class VisionAnalyzer:
                 conf = float(box.conf[0].item())
                 xyxy = box.xyxy[0].tolist()
                 
-                if cls_id == 0:  # person
+                if cls_id == 1:  # person
                     persons.append({'bbox': xyxy, 'conf': conf})
-                elif cls_id == 67:  # cell phone
+                elif cls_id == 0:  # cell phone
                     if conf >= config.PHONE_CONFIDENCE:
                         phones.append({'bbox': xyxy, 'conf': conf})
                         

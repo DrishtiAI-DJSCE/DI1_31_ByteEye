@@ -1,8 +1,13 @@
+train: train/images
+val: valid/images
+test: test/images
 
-path: D:\DRISHTI_MVP\dataset
-train: images/train
-val: images/val
-test: images/test
+nc: 2
+names: ['cell phone', 'person']
 
-nc: 1
-names: ['phone']
+roboflow:
+  workspace: group-1-r0z0v
+  project: my-first-project-cwyjm
+  version: dataset
+  license: Private
+  url: https://app.roboflow.com/group-1-r0z0v/my-first-project-cwyjm/dataset

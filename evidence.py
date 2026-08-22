@@ -21,7 +21,7 @@ def save_evidence(frame, event, session_id: str = None):
         out_dir = os.path.join(config.EVIDENCE_DIR, severity)
     os.makedirs(out_dir, exist_ok=True)
         
-    out_path = os.path.join(out_dir, filename)
+    out_path = os.path.join(out_dir, filename).replace('\\', '/')
     
     viz_frame = frame.copy()
     

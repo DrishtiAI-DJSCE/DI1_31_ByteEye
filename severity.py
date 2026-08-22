@@ -4,7 +4,7 @@ import datetime
 # Object-detected event types where confidence comes from the vision model
 # and is a meaningful discriminator (vs. behavior events where confidence
 # is always 1.0 from the behavior confirmation system).
-_OBJECT_DETECTED_EVENTS = {"MOBILE_PHONE"}
+_OBJECT_DETECTED_EVENTS = {"MOBILE_PHONE", "UNASSOCIATED_MOBILE_PHONE"}
 
 def calculate_risk_score(event_data: dict) -> str:
     """
@@ -148,7 +148,9 @@ def calculate_risk_score(event_data: dict) -> str:
     # -------------------------------------------------------------------
     final_score = max(0, min(100, int(score)))
 
-    if final_score <= config.RISK_THRESHOLDS["LOW_MAX"]:
+    if event_type in {"MOBILE_PHONE", "UNASSOCIATED_MOBILE_PHONE"}:
+        classification = "HIGH"
+    elif final_score <= config.RISK_THRESHOLDS["LOW_MAX"]:
         classification = "LOW"
     elif final_score <= config.RISK_THRESHOLDS["MEDIUM_MAX"]:
         classification = "MEDIUM"

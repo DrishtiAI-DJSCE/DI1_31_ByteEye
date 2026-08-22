@@ -50,7 +50,7 @@ def _int(key: str, default: int) -> int:
 # ---------------------------------------------------------------------------
 # Model paths — point these at a fine-tuned model once you have one
 # ---------------------------------------------------------------------------
-OBJECT_MODEL_PATH: str = os.getenv("OBJECT_MODEL_PATH", "models/yolov8n.pt")
+OBJECT_MODEL_PATH: str = os.getenv("OBJECT_MODEL_PATH", "models/drishti_detector.pt")
 POSE_MODEL_PATH: str = os.getenv("POSE_MODEL_PATH", "models/yolov8n-pose.pt")
 DEVICE: str = os.getenv("DEVICE", "auto")  # "auto" | "cpu" | "cuda" | "mps"
 
@@ -78,7 +78,7 @@ HAND_MOVEMENT_THRESHOLD: float = _float("HAND_MOVEMENT_THRESHOLD", 0.5)
 # Per-Seat Baseline Calibration
 CALIBRATION_SECONDS: float = _float("CALIBRATION_SECONDS", 5.0)
 YAW_DEVIATION_THRESHOLD: float = _float("YAW_DEVIATION_THRESHOLD", 0.20)
-SHOULDER_SHRINK_THRESHOLD: float = _float("SHOULDER_SHRINK_THRESHOLD", 0.65)
+SHOULDER_SHRINK_THRESHOLD: float = _float("SHOULDER_SHRINK_THRESHOLD", 0.80)
 
 # ---------------------------------------------------------------------------
 # Temporal persistence — how long a behaviour must persist before it is
@@ -98,14 +98,33 @@ EVENT_COOLDOWN_SECONDS: float = _float("EVENT_COOLDOWN_SECONDS", 10.0)
 # ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
-DB_PATH: str = os.getenv("DATABASE_PATH", "data/drishti.db")
+DB_PATH: str = os.getenv("DATABASE_PATH", "database/events.db")
 EVIDENCE_DIR: str = os.getenv("EVIDENCE_DIR", "evidence")
 DELETE_SESSION_EVIDENCE_ON_STOP: bool = _bool("DELETE_SESSION_EVIDENCE_ON_STOP", True)
 
 # ---------------------------------------------------------------------------
-# Debug
+# Debug & Diagnostics
 # ---------------------------------------------------------------------------
 DEBUG_MODE: bool = _bool("DEBUG_MODE", False)
+
+DIAGNOSTIC_MODE: bool = _bool("DIAGNOSTIC_MODE", False)
+DIAGNOSTIC_CSV_PATH: str = os.getenv("DIAGNOSTIC_CSV_PATH", "data/diagnostics.csv")
+
+# ---------------------------------------------------------------------------
+# CCTV Behaviour Geometry Constants
+# ---------------------------------------------------------------------------
+CCTV_KPT_MIN_CONF: float = _float("CCTV_KPT_MIN_CONF", 0.35)
+EAR_VISIBLE_MIN_CONF: float = _float("EAR_VISIBLE_MIN_CONF", 0.40)
+EAR_HIDDEN_MAX_CONF: float = _float("EAR_HIDDEN_MAX_CONF", 0.28)
+EAR_ASYMMETRY_RATIO: float = _float("EAR_ASYMMETRY_RATIO", 2.0)
+NOSE_SHOULDER_GLANCE_THRESHOLD: float = _float("NOSE_SHOULDER_GLANCE_THRESHOLD", 0.035)
+
+# Phone association IoU
+PHONE_PERSON_IOU_THRESHOLD: float = _float("PHONE_PERSON_IOU_THRESHOLD", 0.1)
+
+# Rolling history settings
+CALIBRATION_MIN_FRAMES: int = _int("CALIBRATION_MIN_FRAMES", 15)
+TRACK_LOSS_GRACE_PERIOD: float = _float("TRACK_LOSS_GRACE_PERIOD", 1.0)
 
 # ---------------------------------------------------------------------------
 # Risk Classification Thresholds & Weights
