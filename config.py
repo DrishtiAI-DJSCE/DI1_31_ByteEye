@@ -73,6 +73,11 @@ HEAD_TURN_THRESHOLD_RATIO: float = _float("HEAD_TURN_THRESHOLD", 0.85)
 BODY_ROTATION_THRESHOLD_RATIO: float = _float("BODY_ROTATION_THRESHOLD", 0.85)
 HAND_MOVEMENT_THRESHOLD: float = _float("HAND_MOVEMENT_THRESHOLD", 0.5)
 
+# Per-Seat Baseline Calibration
+CALIBRATION_SECONDS: float = _float("CALIBRATION_SECONDS", 5.0)
+YAW_DEVIATION_THRESHOLD: float = _float("YAW_DEVIATION_THRESHOLD", 0.20)
+SHOULDER_SHRINK_THRESHOLD: float = _float("SHOULDER_SHRINK_THRESHOLD", 0.65)
+
 # ---------------------------------------------------------------------------
 # Temporal persistence — how long a behaviour must persist before it is
 # considered a confirmed anomaly.  Prevents single-frame false alarms.
