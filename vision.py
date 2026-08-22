@@ -39,8 +39,8 @@ class VisionAnalyzer:
                     if conf >= config.PHONE_CONFIDENCE:
                         phones.append({'bbox': xyxy, 'conf': conf})
                         
-        # Run pose estimation
-        results_pose = self.pose_model(frame, conf=config.POSE_CONFIDENCE, verbose=False)
+        # Run pose estimation with tracking to enable per-seat baseline calibration
+        results_pose = self.pose_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=config.POSE_CONFIDENCE, verbose=False)
         
         poses = []
         if len(results_pose) > 0:
@@ -51,9 +51,11 @@ class VisionAnalyzer:
                 for i in range(len(boxes)):
                     xyxy = boxes[i].xyxy[0].tolist()
                     kpts = keypoints.data[i].tolist() # guarantees [x,y,conf] shape if model provides it
+                    track_id = int(boxes.id[i].item()) if boxes.id is not None else None
                     poses.append({
                         'bbox': xyxy,
-                        'keypoints': kpts
+                        'keypoints': kpts,
+                        'track_id': track_id
                     })
                     
         return {
