@@ -1,7 +1,7 @@
 import time
 import collections
 import config
-from severity import get_severity
+from severity import calculate_risk_score
 from utils import get_keypoint, calculate_yaw_ratio, is_hand_raised
 
 class BehaviourAnalyzer:
@@ -126,7 +126,7 @@ class BehaviourAnalyzer:
             
         return None, None
         
-    def analyze_frame_data(self, persons, phones, poses):
+    def analyze_frame_data(self, persons, phones, poses, frame_dims=None):
         """
         Analyzes the detections and poses for behaviours.
         Returns a tuple: (confirmed_events, active_highlights)
@@ -146,18 +146,28 @@ class BehaviourAnalyzer:
         best_phone = max(phones, key=lambda p: p['conf']) if is_phone_present else None
         
         if phone_confirmed:
-            confirmed_events.append({
+            event_data = {
                 "event_type": "MOBILE_PHONE",
                 "confidence": best_phone['conf'] if best_phone else 1.0,
                 "bbox": best_phone['bbox'] if best_phone else None,
                 "timestamp": now_ts,
-                "severity": get_severity("MOBILE_PHONE")
-            })
+                "duration": now_ts - self.state["MOBILE_PHONE"]["first_seen"] if self.state.get("MOBILE_PHONE", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims
+            }
+            event_data["severity"] = calculate_risk_score(event_data)
+            confirmed_events.append(event_data)
             
         if phone_active and best_phone:
+            event_data = {
+                "event_type": "MOBILE_PHONE",
+                "confidence": best_phone['conf'],
+                "bbox": best_phone['bbox'],
+                "duration": now_ts - self.state["MOBILE_PHONE"]["first_seen"] if self.state.get("MOBILE_PHONE", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims
+            }
             active_highlights.append({
                 "bbox": best_phone['bbox'],
-                "severity": get_severity("MOBILE_PHONE"),
+                "severity": calculate_risk_score(event_data),
                 "label": "MOBILE PHONE"
             })
         
@@ -246,50 +256,82 @@ class BehaviourAnalyzer:
         hand_confirmed, hand_active = self.update("HAND_MOVEMENT", is_hand_up, config.HAND_MOVEMENT_PERSISTENCE_SECONDS)
         
         if turn_confirmed or turn_freq:
-            confirmed_events.append({
+            event_data = {
                 "event_type": "SIDEWARD_GLANCE",
                 "confidence": 1.0,
                 "bbox": best_pose_turn['bbox'] if best_pose_turn else None,
                 "timestamp": now_ts,
-                "severity": get_severity("SIDEWARD_GLANCE")
-            })
+                "duration": now_ts - self.state["SIDEWARD_GLANCE"]["first_seen"] if self.state.get("SIDEWARD_GLANCE", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims,
+                "is_frequency_anomaly": bool(turn_freq)
+            }
+            event_data["severity"] = calculate_risk_score(event_data)
+            confirmed_events.append(event_data)
             
         if turn_active and best_pose_turn:
+            event_data = {
+                "event_type": "SIDEWARD_GLANCE",
+                "confidence": 1.0,
+                "bbox": best_pose_turn['bbox'],
+                "duration": now_ts - self.state["SIDEWARD_GLANCE"]["first_seen"] if self.state.get("SIDEWARD_GLANCE", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims
+            }
             active_highlights.append({
                 "bbox": best_pose_turn['bbox'],
-                "severity": get_severity("SIDEWARD_GLANCE"),
+                "severity": calculate_risk_score(event_data),
                 "label": "SIDEWARD GLANCE"
             })
                 
         if rot_confirmed or rot_freq:
-            confirmed_events.append({
+            event_data = {
                 "event_type": "BODY_ROTATION",
                 "confidence": 1.0,
                 "bbox": best_pose_rot['bbox'] if best_pose_rot else None,
                 "timestamp": now_ts,
-                "severity": get_severity("BODY_ROTATION")
-            })
+                "duration": now_ts - self.state["BODY_ROTATION"]["first_seen"] if self.state.get("BODY_ROTATION", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims,
+                "is_frequency_anomaly": bool(rot_freq)
+            }
+            event_data["severity"] = calculate_risk_score(event_data)
+            confirmed_events.append(event_data)
             
         if rot_active and best_pose_rot:
+            event_data = {
+                "event_type": "BODY_ROTATION",
+                "confidence": 1.0,
+                "bbox": best_pose_rot['bbox'],
+                "duration": now_ts - self.state["BODY_ROTATION"]["first_seen"] if self.state.get("BODY_ROTATION", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims
+            }
             active_highlights.append({
                 "bbox": best_pose_rot['bbox'],
-                "severity": get_severity("BODY_ROTATION"),
+                "severity": calculate_risk_score(event_data),
                 "label": "BODY ROTATION"
             })
             
         if hand_confirmed:
-            confirmed_events.append({
+            event_data = {
                 "event_type": "HAND_MOVEMENT",
                 "confidence": 1.0,
                 "bbox": best_pose_hand['bbox'] if best_pose_hand else None,
                 "timestamp": now_ts,
-                "severity": get_severity("HAND_MOVEMENT")
-            })
+                "duration": now_ts - self.state["HAND_MOVEMENT"]["first_seen"] if self.state.get("HAND_MOVEMENT", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims
+            }
+            event_data["severity"] = calculate_risk_score(event_data)
+            confirmed_events.append(event_data)
             
         if hand_active and best_pose_hand:
+            event_data = {
+                "event_type": "HAND_MOVEMENT",
+                "confidence": 1.0,
+                "bbox": best_pose_hand['bbox'],
+                "duration": now_ts - self.state["HAND_MOVEMENT"]["first_seen"] if self.state.get("HAND_MOVEMENT", {}).get("first_seen") else 0.0,
+                "frame_dims": frame_dims
+            }
             active_highlights.append({
                 "bbox": best_pose_hand['bbox'],
-                "severity": get_severity("HAND_MOVEMENT"),
+                "severity": calculate_risk_score(event_data),
                 "label": "HAND RAISE"
             })
                 

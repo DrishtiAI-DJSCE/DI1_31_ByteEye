@@ -183,7 +183,7 @@ def monitoring_page():
     def render_evidence_grid():
         evidence_render_seq["n"] += 1
         render_seq = evidence_render_seq["n"]
-        events = database.get_events()
+        events = database.get_events(session_id=st.session_state.get('session_id'))
         with evidence_grid_placeholder.container():
             filtered_events = [e for e in events if (sev_filter == "All" or e['severity'] == sev_filter) and (status_filter == "All" or e['status'] == status_filter)]
             
@@ -259,7 +259,7 @@ def monitoring_page():
             
             # Behaviors
             confirmed_anomalies, active_highlights = st.session_state['behaviour_analyzer'].analyze_frame_data(
-                res['persons'], res['phones'], res['poses']
+                res['persons'], res['phones'], res['poses'], frame.shape
             )
             
             # Save anomalies

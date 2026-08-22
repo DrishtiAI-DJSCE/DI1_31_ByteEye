@@ -58,6 +58,8 @@ DEVICE: str = os.getenv("DEVICE", "auto")  # "auto" | "cpu" | "cuda" | "mps"
 # Inference & processing
 # ---------------------------------------------------------------------------
 TARGET_FPS: int = _int("ANALYSIS_FPS", 10)  # 8–15 is the realistic range
+WIDE_ANGLE_MODE: bool = _bool("WIDE_ANGLE_MODE", True)
+INFERENCE_IMGSZ: int = _int("INFERENCE_IMGSZ", 1280 if WIDE_ANGLE_MODE else 640)
 
 # ---------------------------------------------------------------------------
 # Confidence thresholds
@@ -104,3 +106,18 @@ DELETE_SESSION_EVIDENCE_ON_STOP: bool = _bool("DELETE_SESSION_EVIDENCE_ON_STOP",
 # Debug
 # ---------------------------------------------------------------------------
 DEBUG_MODE: bool = _bool("DEBUG_MODE", False)
+
+# ---------------------------------------------------------------------------
+# Risk Classification Thresholds & Weights
+# ---------------------------------------------------------------------------
+RISK_THRESHOLDS = {
+    "LOW_MAX": _int("RISK_LOW_MAX", 30),
+    "MEDIUM_MAX": _int("RISK_MEDIUM_MAX", 65)
+}
+
+BEHAVIOR_WEIGHTS = {
+    "MOBILE_PHONE": _int("WEIGHT_MOBILE_PHONE", 60),
+    "BODY_ROTATION": _int("WEIGHT_BODY_ROTATION", 40),
+    "SIDEWARD_GLANCE": _int("WEIGHT_SIDEWARD_GLANCE", 35),
+    "HAND_MOVEMENT": _int("WEIGHT_HAND_MOVEMENT", 20)
+}

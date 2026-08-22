@@ -21,7 +21,7 @@ class VisionAnalyzer:
             dict containing lists of persons, phones, and poses
         """
         # Run object detection. Classes: 0 is person, 67 is cell phone in COCO.
-        results_obj = self.object_model(frame, classes=[0, 67], conf=config.PERSON_CONFIDENCE, verbose=False)
+        results_obj = self.object_model(frame, imgsz=config.INFERENCE_IMGSZ, classes=[0, 67], conf=config.PERSON_CONFIDENCE, verbose=False)
         
         persons = []
         phones = []
@@ -40,7 +40,7 @@ class VisionAnalyzer:
                         phones.append({'bbox': xyxy, 'conf': conf})
                         
         # Run pose estimation with tracking to enable per-seat baseline calibration
-        results_pose = self.pose_model.track(frame, persist=True, tracker="bytetrack.yaml", conf=config.POSE_CONFIDENCE, verbose=False)
+        results_pose = self.pose_model.track(frame, imgsz=config.INFERENCE_IMGSZ, persist=True, tracker="bytetrack.yaml", conf=config.POSE_CONFIDENCE, verbose=False)
         
         poses = []
         if len(results_pose) > 0:

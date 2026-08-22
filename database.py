@@ -64,6 +64,9 @@ def insert_event(event: dict, session_id: str = None) -> int:
     `event` may contain:
         confidence, snapshot_path, bbox (ignored at DB level)
     """
+    if not session_id:
+        return -1
+        
     conn = _get_conn()
     cur = conn.execute(
         """
@@ -88,7 +91,7 @@ def insert_event(event: dict, session_id: str = None) -> int:
     return event_id
 
 
-def get_events(status: str = None, severity: str = None) -> list[dict]:
+def get_events(status: str = None, severity: str = None, session_id: str = None) -> list[dict]:
     """
     Return all events, optionally filtered, newest first.
     Pass status="NEW" or severity="HIGH" to filter.
@@ -97,6 +100,10 @@ def get_events(status: str = None, severity: str = None) -> list[dict]:
     conn = _get_conn()
     query = "SELECT * FROM events WHERE 1=1"
     params: list = []
+
+    if session_id:
+        query += " AND session_id = ?"
+        params.append(session_id)
 
     if status and status != "All":
         query += " AND status = ?"

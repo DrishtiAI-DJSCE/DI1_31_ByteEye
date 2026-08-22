@@ -28,8 +28,8 @@ def calculate_yaw_ratio(center_kpt, left_kpt, right_kpt):
         
     D_left = abs(c_x - l_x)
     D_right = abs(c_x - r_x)
-    
-    return max(D_left, D_right) / (D_left + D_right + 1e-5)
+    # Signed yaw ratio: ~0.5 is frontal, 0.0 is full right, 1.0 is full left.
+    return D_left / (D_left + D_right + 1e-5)
 
 def is_hand_raised(kpts, bbox_height, threshold_ratio):
     if len(kpts) <= 10:
