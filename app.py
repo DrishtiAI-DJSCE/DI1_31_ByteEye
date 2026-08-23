@@ -265,7 +265,8 @@ def monitoring_page():
             t0 = time.time()
             
             # Analyze
-            res = st.session_state['vision'].process_frame(frame)
+            inf_size = 640 if st.session_state['input_mode'] == "LIVE_CAMERA" else config.INFERENCE_IMGSZ
+            res = st.session_state['vision'].process_frame(frame, imgsz_override=inf_size)
             
             # Behaviors
             confirmed_anomalies, active_highlights = st.session_state['behaviour_analyzer'].analyze_frame_data(

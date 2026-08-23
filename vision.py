@@ -14,14 +14,15 @@ class VisionAnalyzer:
             if os.path.exists(model_file) and not os.path.exists(f"models/{model_file}"):
                 shutil.move(model_file, f"models/{model_file}")
                 
-    def process_frame(self, frame):
+    def process_frame(self, frame, imgsz_override=None):
         """
         Processes a single frame for objects (person, phone) and poses.
         Returns:
             dict containing lists of persons, phones, and poses
         """
         # Run object detection. Custom Model Classes: 0 is cell phone, 1 is person.
-        results_obj = self.object_model(frame, imgsz=config.INFERENCE_IMGSZ, conf=config.PERSON_CONFIDENCE, verbose=False)
+        inf_size = imgsz_override if imgsz_override else config.INFERENCE_IMGSZ
+        results_obj = self.object_model(frame, imgsz=inf_size, conf=config.PERSON_CONFIDENCE, verbose=False)
         
         persons = []
         phones = []
@@ -40,7 +41,7 @@ class VisionAnalyzer:
                         phones.append({'bbox': xyxy, 'conf': conf})
                         
         # Run pose estimation with tracking to enable per-seat baseline calibration
-        results_pose = self.pose_model.track(frame, imgsz=config.INFERENCE_IMGSZ, persist=True, tracker="bytetrack.yaml", conf=config.POSE_CONFIDENCE, verbose=False)
+        results_pose = self.pose_model.track(frame, imgsz=inf_size, persist=True, tracker="bytetrack.yaml", conf=config.POSE_CONFIDENCE, verbose=False)
         
         poses = []
         if len(results_pose) > 0:
