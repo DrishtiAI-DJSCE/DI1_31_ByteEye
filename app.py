@@ -108,7 +108,7 @@ def monitoring_page():
         
     # --- Top Header ---
     mode_str = "LIVE CAMERA" if st.session_state['input_mode'] == "LIVE_CAMERA" else "UPLOADED VIDEO"
-    st.markdown(f"### DRISHTI &nbsp;&nbsp;&nbsp; 🟢 LIVE &nbsp;&nbsp;&nbsp; FPS: {config.TARGET_FPS}")
+    st.markdown(f"### DRISHTI &nbsp;&nbsp;&nbsp; 🟢 LIVE &nbsp;&nbsp;&nbsp; AI Target FPS: {config.AI_TARGET_FPS}")
     st.write("---")
     
     # --- KPIs ---
@@ -226,7 +226,9 @@ def monitoring_page():
     cap = None
     try:
         if st.session_state['input_mode'] == "LIVE_CAMERA":
-            cap = cv2.VideoCapture(0)
+            # DirectShow allows controlling BUFFERSIZE on Windows to prevent massive latency
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) if os.name == 'nt' else cv2.VideoCapture(0)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             st.session_state['camera_open'] = True
             st.session_state['video_open'] = False
         else:
@@ -239,7 +241,27 @@ def monitoring_page():
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if st.session_state['input_mode'] == "UPLOADED_VIDEO" else 0
         
+        # Initialize playback sync for video files to maintain 1x wall-clock speed
+        if st.session_state['input_mode'] == "UPLOADED_VIDEO":
+            st.session_state['playback_start_time'] = time.perf_counter()
+            st.session_state['playback_start_frame'] = st.session_state['frame_idx']
+        
         while not st.session_state['stop_monitoring']:
+            
+            if st.session_state['input_mode'] == "UPLOADED_VIDEO":
+                elapsed_wall = time.perf_counter() - st.session_state['playback_start_time']
+                expected_frame = st.session_state['playback_start_frame'] + int(elapsed_wall * fps)
+                
+                if expected_frame <= st.session_state['frame_idx']:
+                    # Video is running faster than 1x speed, yield CPU slightly
+                    time.sleep(0.01)
+                else:
+                    # AI is slower than video, fast-forward by grabbing frames without decoding
+                    while st.session_state['frame_idx'] < expected_frame:
+                        ret_skip = cap.grab()
+                        if not ret_skip: break
+                        st.session_state['frame_idx'] += 1
+
             ret, frame = cap.read()
             if not ret:
                 if st.session_state['input_mode'] != "LIVE_CAMERA":
@@ -252,25 +274,21 @@ def monitoring_page():
                 frame = cv2.flip(frame, 1)
                 
             st.session_state['frame_idx'] += 1
-            
-            # Skip frames to maintain real-time playback for uploaded video
-            if st.session_state['input_mode'] == "UPLOADED_VIDEO":
-                skip_frames = max(1, int(fps / config.TARGET_FPS)) - 1
-                for _ in range(skip_frames):
-                    ret_skip, _ = cap.read()
-                    if not ret_skip:
-                        break
-                    st.session_state['frame_idx'] += 1
                     
             t0 = time.time()
+            t_cap = time.perf_counter()
             
             # Analyze
+            t_ai_start = time.perf_counter()
             res = st.session_state['vision'].process_frame(frame)
+            t_ai_end = time.perf_counter()
             
             # Behaviors
+            t_beh_start = time.perf_counter()
             confirmed_anomalies, active_highlights = st.session_state['behaviour_analyzer'].analyze_frame_data(
                 res['persons'], res['phones'], res['poses'], frame.shape
             )
+            t_beh_end = time.perf_counter()
             
             # Save anomalies
             evidence_added = False
@@ -392,9 +410,15 @@ def monitoring_page():
             if evidence_added:
                 render_evidence_grid()
                 
+            t_render_end = time.perf_counter()
+            
+            # Profiling print
+            if getattr(config, "DEBUG_MODE", True):
+                print(f"[PROFILE] Cap+Pre: {(t_ai_start - t_cap)*1000:.1f}ms | Vision: {(t_ai_end - t_ai_start)*1000:.1f}ms (Obj: {res.get('t_obj', 0)*1000:.1f}ms, Pose: {res.get('t_pose', 0)*1000:.1f}ms) | Behav: {(t_beh_end - t_beh_start)*1000:.1f}ms | Render: {(t_render_end - t_beh_end)*1000:.1f}ms | Total: {(t_render_end - t_cap)*1000:.1f}ms | FPS: {1.0/max(0.001, t_render_end - t_cap):.1f}")
+                
             # Simple FPS target
             elapsed_time = time.time() - t0
-            sleep_time = max(0, (1.0 / config.TARGET_FPS) - elapsed_time)
+            sleep_time = max(0, (1.0 / config.AI_TARGET_FPS) - elapsed_time)
             time.sleep(sleep_time)
 
     finally:
@@ -464,7 +488,7 @@ def main():
         st.write("---")
         st.write(f"Object Confidence: {config.PERSON_CONFIDENCE}")
         st.write(f"Phone Confidence: {config.PHONE_CONFIDENCE}")
-        st.write(f"Analysis FPS Target: {config.TARGET_FPS}")
+        st.write(f"Analysis FPS Target: {config.AI_TARGET_FPS}")
         st.write(f"Cooldown (s): {config.EVENT_COOLDOWN_SECONDS}")
 
 if __name__ == "__main__":

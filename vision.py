@@ -20,8 +20,12 @@ class VisionAnalyzer:
         Returns:
             dict containing lists of persons, phones, and poses
         """
+        import time
+        
+        t0 = time.perf_counter()
         # Run object detection. Custom Model Classes: 0 is cell phone, 1 is person.
         results_obj = self.object_model(frame, imgsz=config.INFERENCE_IMGSZ, conf=config.PERSON_CONFIDENCE, verbose=False)
+        t1 = time.perf_counter()
         
         persons = []
         phones = []
@@ -39,8 +43,10 @@ class VisionAnalyzer:
                     if conf >= config.PHONE_CONFIDENCE:
                         phones.append({'bbox': xyxy, 'conf': conf})
                         
+        t2 = time.perf_counter()
         # Run pose estimation with tracking to enable per-seat baseline calibration
         results_pose = self.pose_model.track(frame, imgsz=config.INFERENCE_IMGSZ, persist=True, tracker="bytetrack.yaml", conf=config.POSE_CONFIDENCE, verbose=False)
+        t3 = time.perf_counter()
         
         poses = []
         if len(results_pose) > 0:
@@ -61,5 +67,7 @@ class VisionAnalyzer:
         return {
             'persons': persons,
             'phones': phones,
-            'poses': poses
+            'poses': poses,
+            't_obj': t1 - t0,
+            't_pose': t3 - t2
         }

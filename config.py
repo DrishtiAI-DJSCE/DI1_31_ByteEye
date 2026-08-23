@@ -57,9 +57,10 @@ DEVICE: str = os.getenv("DEVICE", "auto")  # "auto" | "cpu" | "cuda" | "mps"
 # ---------------------------------------------------------------------------
 # Inference & processing
 # ---------------------------------------------------------------------------
-TARGET_FPS: int = _int("ANALYSIS_FPS", 10)  # 8–15 is the realistic range
+TARGET_FPS: int = _int("ANALYSIS_FPS", 10) # Deprecated, use AI_TARGET_FPS
+AI_TARGET_FPS: int = _int("AI_TARGET_FPS", 10)  # 8–15 is the realistic range
 WIDE_ANGLE_MODE: bool = _bool("WIDE_ANGLE_MODE", True)
-INFERENCE_IMGSZ: int = _int("INFERENCE_IMGSZ", 1280 if WIDE_ANGLE_MODE else 640)
+INFERENCE_IMGSZ: int = _int("INFERENCE_IMGSZ", 960 if WIDE_ANGLE_MODE else 640)
 
 # ---------------------------------------------------------------------------
 # Confidence thresholds
