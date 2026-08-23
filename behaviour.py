@@ -375,15 +375,17 @@ class BehaviourAnalyzer:
 
             # --- Emitting Events ---
             if turn_conf or turn_freq:
+                fs = self.state[track_id]["SIDEWARD_GLANCE"]["first_seen"]
                 ev = {"event_type": "SIDEWARD_GLANCE", "confidence": 1.0, "bbox": bbox, "timestamp": now_ts,
-                      "duration": now_ts - self.state[track_id]["SIDEWARD_GLANCE"]["first_seen"], "frame_dims": frame_dims}
+                      "duration": now_ts - fs if fs > 0 else 0.0, "frame_dims": frame_dims}
                 ev["severity"] = calculate_risk_score(ev)
                 confirmed_events.append(ev)
             if turn_act: active_highlights.append({"bbox": bbox, "severity": "MEDIUM", "label": "SIDEWARD GLANCE"})
 
             if rot_conf or rot_freq:
+                fs = self.state[track_id]["BODY_ROTATION"]["first_seen"]
                 ev = {"event_type": "BODY_ROTATION", "confidence": 1.0, "bbox": bbox, "timestamp": now_ts,
-                      "duration": now_ts - self.state[track_id]["BODY_ROTATION"]["first_seen"], "frame_dims": frame_dims}
+                      "duration": now_ts - fs if fs > 0 else 0.0, "frame_dims": frame_dims}
                 ev["severity"] = calculate_risk_score(ev)
                 confirmed_events.append(ev)
             if rot_act: active_highlights.append({"bbox": bbox, "severity": "MEDIUM", "label": "BODY ROTATION"})
