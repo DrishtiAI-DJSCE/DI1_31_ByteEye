@@ -124,6 +124,7 @@ class BehaviourAnalyzer:
                 "baseline_width": None,
                 "baseline_wrist": None,
                 "last_seen":      now_ts,
+                "smoothing_yaw":  [],
             }
 
         tb = self.track_baselines[track_id]
@@ -137,10 +138,23 @@ class BehaviourAnalyzer:
                 med_wrist, _ = robust_stats(tb["history_wrist"])
                 tb["baseline_wrist"] = med_wrist
                 
-            return tb["baseline_yaw"], tb["baseline_width"], tb["baseline_wrist"]
+            smoothed_nsr = None
+            if raw_yaw is not None:
+                tb["smoothing_yaw"].append(raw_yaw)
+                if len(tb["smoothing_yaw"]) > config.GLANCE_SMOOTHING_FRAMES: tb["smoothing_yaw"].pop(0)
+                smoothed_nsr, _ = robust_stats(tb["smoothing_yaw"])
+
+            return tb["baseline_yaw"], tb["baseline_width"], tb["baseline_wrist"], smoothed_nsr
+
+        # Smooth raw yaw before calibration
+        smoothed_nsr = None
+        if raw_yaw is not None:
+            tb["smoothing_yaw"].append(raw_yaw)
+            if len(tb["smoothing_yaw"]) > config.GLANCE_SMOOTHING_FRAMES: tb["smoothing_yaw"].pop(0)
+            smoothed_nsr, _ = robust_stats(tb["smoothing_yaw"])
 
         # Only add valid readings
-        if raw_yaw is not None: tb["history_yaw"].append(raw_yaw)
+        if smoothed_nsr is not None: tb["history_yaw"].append(smoothed_nsr)
         if shoulder_width is not None: tb["history_width"].append(shoulder_width)
         if wrist_y is not None: tb["history_wrist"].append(wrist_y)
 
@@ -158,8 +172,8 @@ class BehaviourAnalyzer:
             if len(hy) >= config.CALIBRATION_MIN_FRAMES and len(hw) >= config.CALIBRATION_MIN_FRAMES:
                 med_yaw, mad_yaw = robust_stats(hy)
                 
-                # Check stability using MAD instead of range
-                if mad_yaw is not None and mad_yaw < 0.10: 
+                # Check stability using MAD. A stable head posture shouldn't drift more than ~0.05
+                if mad_yaw is not None and mad_yaw < 0.05: 
                     tb["baseline_yaw"] = med_yaw
                     med_width, _ = robust_stats(hw)
                     tb["baseline_width"] = med_width
@@ -167,13 +181,13 @@ class BehaviourAnalyzer:
                     tb["baseline_wrist"] = med_wrist
                     
                     tb["locked"] = True
-                    return tb["baseline_yaw"], tb["baseline_width"], tb["baseline_wrist"]
+                    return tb["baseline_yaw"], tb["baseline_width"], tb["baseline_wrist"], smoothed_nsr
 
             # Not stable yet: slide window forward
             tb["start_time"] = now_ts - (config.CALIBRATION_SECONDS * 0.5)
 
         med_wrist, _ = robust_stats(tb["history_wrist"]) if tb["history_wrist"] else (None, 0)
-        return None, None, med_wrist
+        return None, None, med_wrist, smoothed_nsr
 
     def _nose_shoulder_ratio(self, kpts: list) -> float | None:
         if len(kpts) < 7: return None
@@ -293,23 +307,21 @@ class BehaviourAnalyzer:
             sw = self._shoulder_width(kpts)
             wrist_y = self._get_avg_wrist_y(kpts)
 
-            baseline_yaw, baseline_width, baseline_wrist = self.process_calibration(track_id, nsr, sw, wrist_y, now_ts)
+            baseline_yaw, baseline_width, baseline_wrist, smoothed_nsr = self.process_calibration(track_id, nsr, sw, wrist_y, now_ts)
 
             # --- Detection Logic ---
             is_turning = False
             yaw_deviation = 0.0
             
-            if nsr is not None:
+            if smoothed_nsr is not None:
                 if baseline_yaw is not None:
-                    yaw_deviation = abs(nsr - baseline_yaw)
+                    yaw_deviation = abs(smoothed_nsr - baseline_yaw)
                     if yaw_deviation > config.NOSE_SHOULDER_GLANCE_THRESHOLD:
                         is_turning = True
-                else:
-                    if nsr > (config.NOSE_SHOULDER_GLANCE_THRESHOLD + 0.05):
-                        is_turning = True
 
-            if not is_turning and ear_glance and nsr is not None and nsr > (config.NOSE_SHOULDER_GLANCE_THRESHOLD - 0.05):
-                is_turning = True
+            if not is_turning and ear_glance and smoothed_nsr is not None and baseline_yaw is not None:
+                if smoothed_nsr > (baseline_yaw + config.NOSE_SHOULDER_GLANCE_THRESHOLD - 0.05):
+                    is_turning = True
 
             is_rotating = False
             width_ratio = 1.0
@@ -357,7 +369,7 @@ class BehaviourAnalyzer:
                 with open(config.DIAGNOSTIC_CSV_PATH, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([
-                        now_ts, track_id, nsr, baseline_yaw, yaw_deviation, sw, baseline_width, width_ratio,
+                        now_ts, track_id, smoothed_nsr, baseline_yaw, yaw_deviation, sw, baseline_width, width_ratio,
                         wrist_deviation, 0.0, p_conf, assoc_iou, candidate, ""
                     ])
 
